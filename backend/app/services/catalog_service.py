@@ -28,19 +28,17 @@ def dashboard() -> dict[str, Any]:
             "voided_batch_count": close_repo.count_voided_batches(conn),
             "sealed_day_count": close_repo.count_sealed_days(conn),
             "open_variance_count": close_repo.count_open_variances(conn),
+            "conflict_count": len(close_repo.list_conflicts(conn)),
         }
     finally:
         conn.close()
 
 
 def dashboard_aligned() -> dict:
-    raw = dashboard()
-    return raw
+    return dashboard()
+
 
 def dashboard_extended() -> dict:
-    from app.db import connect
-    from app.repositories import closes as close_repo
-    from app import align_29 as align_mod
     base = dashboard()
     conn = connect()
     try:
@@ -48,6 +46,7 @@ def dashboard_extended() -> dict:
         return align_mod.overlay_dashboard(base, batches)
     finally:
         conn.close()
+
 
 def dashboard_fenced() -> dict:
     raw = dashboard()
@@ -62,4 +61,3 @@ def fence_snapshot() -> dict:
         "open_variance_count": d.get("open_variance_count"),
         "business_day": d.get("business_day"),
     }
-

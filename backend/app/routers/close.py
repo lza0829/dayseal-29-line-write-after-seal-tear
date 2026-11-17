@@ -27,3 +27,18 @@ def batches():
 @router.get("/variances")
 def variances():
     return svc.list_variances()
+
+
+@router.get("/conflicts")
+def conflicts(business_day: str | None = None):
+    return svc.list_conflicts(business_day)
+
+
+@router.get("/integrity")
+def integrity(business_day: str | None = None):
+    return svc.day_integrity(business_day)
+
+
+@router.post("/repair")
+def repair(body: dict = Body(default={})):
+    return svc.repair_sealed(body or {})

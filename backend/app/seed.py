@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS close_batches (
   note TEXT,
   voided_at TEXT,
   void_reason TEXT,
-  superseded_by_batch_id INTEGER
+  superseded_by_batch_id INTEGER,
+  line_fingerprint TEXT,
+  header_fingerprint TEXT
 );
 CREATE TABLE IF NOT EXISTS variance_rows (
   id INTEGER PRIMARY KEY,
@@ -60,6 +62,47 @@ CREATE TABLE IF NOT EXISTS reopen_requests (
   reason TEXT,
   created_at TEXT
 );
+
+-- Frozen effective set of a sealed batch. The snapshot is the rollback target
+-- for any write that slipped past the seal gate: restoring these rows restores
+-- the exact line set the batch was pinned to.
+CREATE TABLE IF NOT EXISTS sealed_line_snapshot (
+  batch_id INTEGER NOT NULL,
+  line_id INTEGER NOT NULL,
+  line_no TEXT NOT NULL,
+  till_code TEXT NOT NULL,
+  business_day TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  amount REAL NOT NULL,
+  pay_method TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (batch_id, line_id)
+);
+
+-- One row per attempted or repaired write against a sealed partition. Both
+-- rejected attempts and automatic rollbacks land here so the conflict is
+-- auditable instead of silently disappearing.
+CREATE TABLE IF NOT EXISTS write_conflicts (
+  id INTEGER PRIMARY KEY,
+  business_day TEXT NOT NULL,
+  batch_id INTEGER,
+  path TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Cash pickups ("解款") are ancillary writes to a business day and obey the
+-- same seal gate as the cash lines themselves.
+CREATE TABLE IF NOT EXISTS cash_pickups (
+  id INTEGER PRIMARY KEY,
+  business_day TEXT NOT NULL,
+  till_code TEXT NOT NULL,
+  amount REAL NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
 '''
 
 
@@ -73,17 +116,19 @@ def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) ->
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Bring databases created before the reopen policy up to the current shape."""
+    """Bring databases created before the seal-freeze policy up to shape."""
     _add_column(conn, "close_batches", "voided_at", "TEXT")
     _add_column(conn, "close_batches", "void_reason", "TEXT")
     _add_column(conn, "close_batches", "superseded_by_batch_id", "INTEGER")
+    _add_column(conn, "close_batches", "line_fingerprint", "TEXT")
+    _add_column(conn, "close_batches", "header_fingerprint", "TEXT")
     _add_column(conn, "reopen_requests", "batch_id", "INTEGER")
     _add_column(conn, "reopen_requests", "reason", "TEXT")
     _add_column(conn, "reopen_requests", "created_at", "TEXT")
 
     # At most one current (sealed) batch per business day. Legacy databases that
     # already hold duplicates cannot get the index; the application-level check
-    # inside BEGIN IMMEDIATE still serialises seal()/reopen() in that case.
+    # inside BEGIN IMMEDIATE still serialises seal()/reopen()/write gates.
     try:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_close_batches_sealed_day "

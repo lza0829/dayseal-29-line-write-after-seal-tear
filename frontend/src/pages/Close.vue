@@ -5,6 +5,7 @@ import { api } from '../api'
 const preview = ref(null)
 const declared = ref(0)
 const batches = ref([])
+const conflicts = ref([])
 const reason = ref('')
 const msg = ref('')
 const err = ref('')
@@ -13,9 +14,11 @@ async function load() {
   preview.value = await api.closePreview()
   if (!preview.value.sealed) declared.value = preview.value.system_total
   batches.value = await api.batches()
+  conflicts.value = await api.conflicts(preview.value.business_day)
 }
 
 const currentBatch = computed(() => preview.value?.current_batch || null)
+const integrity = computed(() => preview.value?.integrity || null)
 const batchNoById = computed(() => {
   const m = {}
   for (const b of preview.value?.history || []) m[b.id] = b.batch_no
@@ -47,6 +50,17 @@ async function reopen() {
   } catch (e) { err.value = e.message }
 }
 
+async function repair() {
+  msg.value = ''; err.value = ''
+  try {
+    const r = await api.repair({ business_day: preview.value.business_day })
+    msg.value = r.count
+      ? `已修复 ${r.count} 个封账日：有效集合与批头已恢复冻结快照`
+      : '所有封账日的有效集合与批头均与指纹一致'
+    await load()
+  } catch (e) { err.value = e.message }
+}
+
 function batchState(b) {
   if (b.status === 'sealed') return { text: '现行已封', cls: 'ok' }
   if (b.status === 'voided') return { text: '已作废', cls: 'bad' }
@@ -54,26 +68,6 @@ function batchState(b) {
 }
 
 onMounted(load)
-
-/* align-29 */
-function alignHint(batch) {
-  if (!batch) return ''
-  const v = Number(batch.variance || 0)
-  const s = Number(batch.system_total || 0)
-  const d = Number(batch.declared_cash || 0)
-  return [s, d, v].join('/')
-}
-function alignRows(rows) {
-  return (rows || []).map(r => ({ ...r, align: alignHint(r) }))
-}
-
-/* fence-29 */
-
-function precheckView(p) {
-  if (!p) return {}
-  return { gate: p.gate_open, fp: p.fp_ok, bypass: p.bypass }
-}
-
 </script>
 
 <template>
@@ -85,6 +79,13 @@ function precheckView(p) {
       <template v-if="currentBatch">· 现行批次 {{ currentBatch.batch_no }}</template>
     </p>
 
+    <p v-if="integrity && integrity.sealed" class="msg" :class="integrity.consistent ? '' : 'err'">
+      钉扎校验：批头指纹 {{ integrity.header_fingerprint.slice(0, 12) }}… ·
+      有效集合 {{ integrity.consistent ? '与冻结快照一致' : '已偏离冻结快照' }}
+      （快照 {{ integrity.snapshot_line_count }} 笔 / 现行 {{ integrity.live_line_count }} 笔）
+      <button v-if="!integrity.consistent" class="btn ghost small" @click="repair">修复并回滚</button>
+    </p>
+
     <div v-if="preview.sealed" class="row">
       <label>解封原因（必填，留档）
         <input v-model="reason" placeholder="如：漏记一笔现金流水" />
@@ -94,6 +95,7 @@ function precheckView(p) {
     </div>
     <p v-if="preview.sealed" class="msg">
       解封会把现行批次改为 voided（原合计、明细、快照一律不改写），并解除该日写锁；补录后重新封账将生成新批号，长短款以新封为准。
+      封账期间所有旁路写入（改金额/导入/冲正/改日/解款）一律拒写并记冲突审计。
     </p>
 
     <div v-else class="row">
@@ -124,6 +126,24 @@ function precheckView(p) {
   </div>
 
   <div class="panel">
+    <h2>封后写入冲突审计</h2>
+    <p class="msg">任何旁路写入尝试都会留下一条记录：被拒绝（rejected）或已回滚（rolled_back）。</p>
+    <table v-if="conflicts.length">
+      <thead><tr><th>时间</th><th>营业日</th><th>入口</th><th>处置</th><th>详情</th></tr></thead>
+      <tbody>
+        <tr v-for="c in conflicts" :key="c.id">
+          <td>{{ c.created_at }}</td>
+          <td>{{ c.business_day }}</td>
+          <td>{{ c.path }}</td>
+          <td><span class="tag" :class="c.outcome === 'rejected' ? 'warn' : 'bad'">{{ c.outcome }}</span></td>
+          <td class="detail">{{ c.detail }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p v-else class="msg">无冲突记录。</p>
+  </div>
+
+  <div class="panel">
     <h2>全部封账批次</h2>
     <table>
       <thead><tr><th>批次</th><th>营业日</th><th>系统</th><th>实盘</th><th>差额</th><th>状态</th><th>封账时间</th></tr></thead>
@@ -139,3 +159,4 @@ function precheckView(p) {
     </table>
   </div>
 </template>
+
